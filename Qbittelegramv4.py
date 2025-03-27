@@ -85,14 +85,15 @@ async def notificar_descarga(torrent_hash):
     filled = int(torrent.progress * total_segments)
     bar = "🟦" * filled + "⬜" * (total_segments - filled)
     mensaje_texto = (
-         f"{status_text}: {html.escape(torrent.name)}\n"
-         f"Progreso: {torrent.progress*100:.2f}%\n"
-         f"{bar}\n"
-         f"Tamaño: {formato_tamano(torrent.size)}\n"
-         f"Velocidad: <b>{torrent.dlspeed / 1e6:.2f} MB/s</b>\n"
-         f"Semillas: <b>{torrent.num_seeds}</b> | Pares: <b>{torrent.num_leechs}</b>\n"
-         f"📂 <b>Guardado en:</b> <code>{html.escape(torrent.save_path)}</code>\n"
+        f"✨ {status_text}: {html.escape(torrent.name)}\n"
+        f"📊 Progreso: {torrent.progress*100:.2f}%\n"
+        f"{bar}\n"
+        f"📦 Tamaño: {formato_tamano(torrent.size)}\n"
+        f"🚀 Velocidad: <b>{torrent.dlspeed / 1e6:.2f} MB/s</b>\n"
+        f"🌱 Semillas: <b>{torrent.num_seeds}</b> | 🤝 Pares: <b>{torrent.num_leechs}</b>\n"
+        f"📂 Guardado en: <code>{html.escape(torrent.save_path)}</code>\n"
     )
+
     buttons = [[
          Button.inline(toggle_text, b"toggle:" + torrent_hash.encode()),
          Button.inline("Eliminar", b"delete:" + torrent_hash.encode())
@@ -141,14 +142,15 @@ async def notificar_descarga(torrent_hash):
             filled = int(torrent.progress * total_segments)
             bar = "🟦" * filled + "⬜" * (total_segments - filled)
             mensaje_texto = (
-                 f"{status_text}: {html.escape(torrent.name)}\n"
-                 f"Progreso: {torrent.progress*100:.2f}%\n"
-                 f"{bar}\n"
-                 f"Tamaño: {formato_tamano(torrent.size)}\n"
-                 f"Velocidad: <b>{torrent.dlspeed / 1e6:.2f} MB/s</b>\n"
-                 f"Semillas: <b>{torrent.num_seeds}</b> | Pares: <b>{torrent.num_leechs}</b>\n"
-                 f"📂 <b>Guardado en:</b> <code>{html.escape(torrent.save_path)}</code>\n"
+                f"✨ {status_text}: {html.escape(torrent.name)}\n"
+                f"📊 Progreso: {torrent.progress*100:.2f}%\n"
+                f"{bar}\n"
+                f"📦 Tamaño: {formato_tamano(torrent.size)}\n"
+                f"🚀 Velocidad: <b>{torrent.dlspeed / 1e6:.2f} MB/s</b>\n"
+                f"🌱 Semillas: <b>{torrent.num_seeds}</b> | 🤝 Pares: <b>{torrent.num_leechs}</b>\n"
+                f"📂 Guardado en: <code>{html.escape(torrent.save_path)}</code>\n"
             )
+
             buttons = [[
                  Button.inline(toggle_text, b"toggle:" + torrent_hash.encode()),
                  Button.inline("Eliminar", b"delete:" + torrent_hash.encode())
@@ -360,6 +362,4 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
-
-
 
