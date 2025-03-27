@@ -4,13 +4,13 @@ import qbittorrentapi
 from telethon import TelegramClient, events, Button
 
 # 🔹 Configuración del bot de Telegram
-API_ID = 123456
-API_HASH = ""
-BOT_TOKEN = ""
-CHAT_ID = 123456
+API_ID = 123456 #tu api id de telegram
+API_HASH = "123456" #tu api hash de telegram
+BOT_TOKEN = "12345" #el token del bot que usaras
+CHAT_ID = 123456 #tu chat id de telegram
 
 # 🔹 Configuración de qBittorrent
-QB_HOST = "http://192.168.0.160:6363"
+QB_HOST = "http://192.168.0.160:6363" #ip + puerto de qbittorrent. Debes tener las ips locales o ip de la maquina que ejecuta el script excepcionadas para no pedir autenticacion en qbittorrent.
 
 # 🔹 Variables globales para la conexión y control
 qb = None
