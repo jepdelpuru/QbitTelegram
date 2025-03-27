@@ -85,7 +85,7 @@ async def notificar_descarga(torrent_hash):
     filled = int(torrent.progress * total_segments)
     bar = "🟦" * filled + "⬜" * (total_segments - filled)
     mensaje_texto = (
-        f"✨ {status_text}: {html.escape(torrent.name)}\n"
+        f"{status_text}: {html.escape(torrent.name)}\n"
         f"📊 Progreso: {torrent.progress*100:.2f}%\n"
         f"{bar}\n"
         f"📦 Tamaño: {formato_tamano(torrent.size)}\n"
@@ -142,7 +142,7 @@ async def notificar_descarga(torrent_hash):
             filled = int(torrent.progress * total_segments)
             bar = "🟦" * filled + "⬜" * (total_segments - filled)
             mensaje_texto = (
-                f"✨ {status_text}: {html.escape(torrent.name)}\n"
+                f"{status_text}: {html.escape(torrent.name)}\n"
                 f"📊 Progreso: {torrent.progress*100:.2f}%\n"
                 f"{bar}\n"
                 f"📦 Tamaño: {formato_tamano(torrent.size)}\n"
