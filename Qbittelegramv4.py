@@ -4,10 +4,10 @@ import qbittorrentapi
 from telethon import TelegramClient, events, Button
 
 # 🔹 Configuración del bot de Telegram
-API_ID = 
+API_ID = 123456
 API_HASH = ""
 BOT_TOKEN = ""
-CHAT_ID = 
+CHAT_ID = 123456
 
 # 🔹 Configuración de qBittorrent
 QB_HOST = "http://192.168.0.160:6363"
@@ -17,6 +17,8 @@ qb = None
 active_tasks = {}      # Tareas asíncronas de notificación dinámica, clave: torrent_hash
 active_messages = {}   # Mensajes enviados por cada torrent, clave: torrent_hash
 paused_torrents = set()  # Conjunto de hashes de torrents pausados
+pending_torrents = {}  # key: id único, value: ruta del archivo torrent
+
 
 # --- Función para conectar con qBittorrent ---
 async def conectar_qbittorrent():
@@ -81,7 +83,7 @@ async def notificar_descarga(torrent_hash):
         toggle_text = "Pausar"
 
     filled = int(torrent.progress * total_segments)
-    bar = "🟩" * filled + "⬜" * (total_segments - filled)
+    bar = "🟦" * filled + "⬜" * (total_segments - filled)
     mensaje_texto = (
          f"{status_text}: {html.escape(torrent.name)}\n"
          f"Progreso: {torrent.progress*100:.2f}%\n"
@@ -137,7 +139,7 @@ async def notificar_descarga(torrent_hash):
             ultimo_progreso = torrent.progress
 
             filled = int(torrent.progress * total_segments)
-            bar = "🟩" * filled + "⬜" * (total_segments - filled)
+            bar = "🟦" * filled + "⬜" * (total_segments - filled)
             mensaje_texto = (
                  f"{status_text}: {html.escape(torrent.name)}\n"
                  f"Progreso: {torrent.progress*100:.2f}%\n"
@@ -164,13 +166,15 @@ async def notificar_descarga(torrent_hash):
                     print(f"Error al borrar mensaje: {e}")
                 active_messages.pop(torrent_hash, None)
                 mensaje_final_texto = (
-                     f"✅ <b>Descarga completada:</b>\n\n"
-                     f"🎬 <b>{html.escape(torrent.name)}</b>\n"
-                     f"📏 <b>{formato_tamano(torrent.size)}</b>\n"
-                     f"📂 <b>Guardado en:</b> <code>{html.escape(torrent.save_path)}</code>\n"
+                    f"✅ <b>Descarga completada:</b>\n\n"
+                    f"🎬 <b>{html.escape(torrent.name)}</b>\n"
+                    f"📏 <b>{formato_tamano(torrent.size)}</b>\n"
+                    f"📂 <b>Guardado en:</b> <code>{html.escape(torrent.save_path)}</code>\n"
                 )
                 buttons_final = [[ Button.inline("Eliminar", b"delete:" + torrent_hash.encode()) ]]
-                await bot.send_message(CHAT_ID, mensaje_final_texto, parse_mode="html", buttons=buttons_final)
+                # Guardar el mensaje final en active_messages:
+                mensaje_final = await bot.send_message(CHAT_ID, mensaje_final_texto, parse_mode="html", buttons=buttons_final)
+                active_messages[torrent_hash] = mensaje_final
                 break
     except asyncio.CancelledError:
         try:
@@ -180,7 +184,59 @@ async def notificar_descarga(torrent_hash):
         active_messages.pop(torrent_hash, None)
         raise
 
-# --- Manejador de callback queries para los botones inline ---
+from telethon.tl.types import DocumentAttributeFilename
+
+# Variable global para almacenar archivos .torrent pendientes de asignación de categoría
+pending_torrents = {}  # key: id único (por ejemplo, event.id), value: ruta del archivo torrent
+
+from telethon.tl.types import DocumentAttributeFilename
+
+from telethon.tl.types import DocumentAttributeFilename
+
+@bot.on(events.NewMessage)
+async def handle_torrent_file(event):
+    # Solo procesamos mensajes en chat privado con documentos
+    if event.is_private and event.document:
+        # Buscar el atributo que contenga el nombre del archivo
+        filename = None
+        for attr in event.document.attributes:
+            if isinstance(attr, DocumentAttributeFilename):
+                filename = attr.file_name
+                break
+        # Si no se encontró el nombre, se usa el valor por defecto del documento
+        if not filename:
+            filename = event.document.file_name if hasattr(event.document, 'file_name') else ""
+        # Procesamos solo archivos con extensión .torrent
+        if filename.lower().endswith(".torrent"):
+            # Descargar el archivo en una ruta temporal
+            file_path = await event.download_media()
+            # Usamos el id del mensaje como identificador único
+            torrent_id = str(event.id)
+            pending_torrents[torrent_id] = file_path
+
+            # Intentar obtener las categorías reales definidas en qBittorrent usando el método propio
+            try:
+                # Si tu versión de qbittorrentapi lo soporta, usa:
+                categorias_dict = qb.torrents_categories()
+                print("Respuesta de categorías:", categorias_dict)
+                categorias = list(categorias_dict.keys())
+                if not categorias:
+                    raise Exception("El diccionario de categorías está vacío.")
+            except Exception as e:
+                print(f"Error obteniendo categorías reales desde qBittorrent: {e}")
+                # En caso de error, se usa un listado por defecto
+                categorias = ["Películas", "Series", "Documentales", "Música"]
+
+            # Crear botones: cada botón envía un callback con el formato "category:<torrent_id>:<categoria>"
+            botones = [[Button.inline(categoria, f"category:{torrent_id}:{categoria}".encode())] for categoria in categorias]
+            await bot.send_message(
+                event.chat_id,
+                f"Archivo <b>{html.escape(filename)}</b> recibido.\nSelecciona la categoría para iniciar la descarga:",
+                parse_mode="html",
+                buttons=botones
+            )
+
+
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
     data = event.data
@@ -218,6 +274,32 @@ async def callback_handler(event):
                 print(f"Error al borrar el mensaje de notificación: {e}")
             active_messages.pop(torrent_hash, None)
         await event.answer("Torrent eliminado", alert=True)
+    elif data.startswith(b"category:"):
+        try:
+            decoded = event.data.decode()
+            _, torrent_id, categoria = decoded.split(":", 2)
+            if torrent_id in pending_torrents:
+                file_path = pending_torrents.pop(torrent_id)
+                try:
+                    qb.torrents_add(torrent_files=file_path, category=categoria)
+                    await event.answer(f"Torrent añadido en la categoría {categoria}.", alert=True)
+                    # Borrar el mensaje completo usando message_id
+                    try:
+                        await bot.delete_messages(event.chat_id, event.message_id)
+                    except Exception as e:
+                        print(f"Error borrando el mensaje completo: {e}")
+                    import os
+                    os.remove(file_path)
+                except Exception as e:
+                    await event.answer("Error al añadir el torrent a qBittorrent.", alert=True)
+                    print(f"Error añadiendo torrent: {e}")
+            else:
+                await event.answer("Archivo torrent no encontrado o ya procesado.", alert=True)
+        except Exception as e:
+            await event.answer("Error procesando la selección de categoría.", alert=True)
+            print(f"Error en callback category: {e}")
+
+
 
 # --- Comando para listar descargas activas ---
 @bot.on(events.NewMessage(pattern="/descargas"))
@@ -240,6 +322,7 @@ async def listar_descargas(event):
         await enviar_mensaje(event.chat_id, mensaje)
     except qbittorrentapi.APIConnectionError:
         await event.reply("⚠️ No se puede obtener la lista de descargas, qBittorrent no está accesible.", parse_mode="html")
+
 
 # --- Monitorización de qBittorrent: lanza tareas para torrents nuevos ---
 async def monitorear_qbittorrent():
@@ -277,4 +360,6 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
+
+
 
