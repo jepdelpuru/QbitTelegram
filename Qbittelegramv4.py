@@ -188,13 +188,6 @@ async def notificar_descarga(torrent_hash):
 
 from telethon.tl.types import DocumentAttributeFilename
 
-# Variable global para almacenar archivos .torrent pendientes de asignación de categoría
-pending_torrents = {}  # key: id único (por ejemplo, event.id), value: ruta del archivo torrent
-
-from telethon.tl.types import DocumentAttributeFilename
-
-from telethon.tl.types import DocumentAttributeFilename
-
 @bot.on(events.NewMessage)
 async def handle_torrent_file(event):
     # Solo procesamos mensajes en chat privado con documentos
