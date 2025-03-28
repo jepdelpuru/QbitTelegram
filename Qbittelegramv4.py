@@ -226,7 +226,8 @@ async def handle_torrent_file(event):
             botones = [[Button.inline(categoria, f"category:{torrent_id}:{categoria}".encode())] for categoria in categorias]
             await bot.send_message(
                 event.chat_id,
-                f"Archivo <b>{html.escape(filename)}</b> recibido.\nSelecciona la categoría para iniciar la descarga:",
+                f"📁 ¡Archivo <b>{html.escape(filename)}</b> recibido!\n\n"
+                f"🔍 Por favor, selecciona la categoría para iniciar la descarga:",
                 parse_mode="html",
                 buttons=botones
             )
