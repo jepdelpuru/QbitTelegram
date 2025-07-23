@@ -4,15 +4,18 @@ import qbittorrentapi
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import DocumentAttributeFilename
 import os
+import collections
 
 # 🔹 Configuración del bot de Telegram
-API_ID = xxxxxxxx
-API_HASH = "xxxxxx"
-BOT_TOKEN = "xxxxxxxx"
-CHAT_ID = xxxxxxxx
+API_ID = xxxxx
+API_HASH = "xxxxx"
+BOT_TOKEN = "xxxxxx"
+CHAT_ID = xxxxxx
 
 # 🔹 Configuración de qBittorrent
 QB_HOST = "http://192.168.0.160:6363"
+
+
 
 # 🔹 Variables globales para la conexión y control
 qb = None
@@ -21,6 +24,11 @@ active_messages = {}   # Mensajes enviados por cada torrent, clave: torrent_hash
 paused_torrents = set()  # Conjunto de hashes de torrents pausados
 pending_torrents = {}  # key: id único, value: ruta del archivo torrent
 pending_magnets = {}   # key: id único, value: enlace magnet
+downloads_panel_message = None # Almacena el mensaje del panel para poder editarlo
+downloads_panel_task = None    # Almacena la tarea de actualización del panel
+status_panel_message = None    # Almacena el mensaje del panel de estado
+status_panel_task = None       # Almacena la tarea de actualización del estado
+
 
 # --- Función para conectar con qBittorrent ---
 async def conectar_qbittorrent():
@@ -39,6 +47,13 @@ async def conectar_qbittorrent():
 
 # --- Iniciar bot de Telegram con Telethon ---
 bot = TelegramClient('qbittorrent_bot', API_ID, API_HASH)
+
+def formato_velocidad(speed_bytes):
+    if speed_bytes > 1e6:
+        return f"{speed_bytes / 1e6:.2f} MB/s"
+    if speed_bytes > 1e3:
+        return f"{speed_bytes / 1e3:.1f} KB/s"
+    return "0 KB/s"
 
 # --- Función para formatear tamaños de archivo ---
 def formato_tamano(size_bytes):
@@ -247,9 +262,36 @@ async def handle_magnet_link(event):
 # --- Callback para manejo de botones ---
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
+    global downloads_panel_task, status_panel_task
     if event.sender_id != CHAT_ID:
         return
     data = event.data
+
+    if data == b"close_panel":
+        if downloads_panel_task and not downloads_panel_task.done():
+            downloads_panel_task.cancel()
+            await event.answer("Cerrando el panel de descargas...")
+        else:
+            await event.answer("El panel ya estaba cerrado.", alert=True)
+            try:
+                await event.message.delete()
+            except Exception:
+                pass
+        return
+    
+    elif data == b"close_status":
+        # Lógica modificada para cancelar la tarea del panel de estado
+        if status_panel_task and not status_panel_task.done():
+            status_panel_task.cancel()
+            await event.answer("Cerrando el panel de estado...")
+        else:
+            await event.answer("El panel de estado ya estaba cerrado.", alert=True)
+            try:
+                await event.message.delete()
+            except Exception:
+                pass
+        return
+
     if data.startswith(b"toggle:"):
         torrent_hash = data.split(b":", 1)[1].decode()
         try:
@@ -320,28 +362,215 @@ async def callback_handler(event):
             print(f"Error en callback category: {e}")
 
 # --- Comando para listar descargas activas ---
+# NUEVO: Función para abreviar nombres largos
+def abreviar_nombre(nombre, longitud=28):
+    if len(nombre) > longitud:
+        return nombre[:longitud-3] + "..."
+    return nombre
+
+async def update_status_panel(event):
+    global status_panel_message
+    
+    start_time = asyncio.get_event_loop().time()
+    timeout_seconds = 120  # 2 minutos
+
+    try:
+        while True:
+            if asyncio.get_event_loop().time() - start_time > timeout_seconds:
+                print("Panel de estado cerrado por timeout.")
+                if status_panel_message:
+                    try:
+                        await status_panel_message.delete()
+                    except Exception:
+                        pass
+                break 
+
+            try:
+                main_data = qb.sync_maindata()
+                server_state = main_data.server_state
+                qb_version = qb.app_version()
+                all_torrents = qb.torrents_info() 
+
+                category_counts = collections.defaultdict(int)
+                for t in all_torrents:
+                    category_counts[t.category] += 1
+
+                category_items = []
+                if category_counts:
+                    for name, count in sorted(category_counts.items()):
+                        display_name = "Sin Categoría" if name == "" else html.escape(name)
+                        category_items.append(f"  <b>{display_name}:</b> <code>{count} torrents</code>")
+                
+                category_section_str = ""
+                if category_items:
+                    category_section_str = "\n📂 <b><u>Torrents por Categoría</u></b>\n" + "\n".join(category_items) + "\n"
+
+                session_download = formato_tamano(server_state.dl_info_data)
+                session_upload = formato_tamano(server_state.up_info_data)
+                
+                ratio_val = server_state.global_ratio
+                if isinstance(ratio_val, (int, float)):
+                    global_ratio = f"{ratio_val:.2f}"
+                else:
+                    global_ratio = str(ratio_val) 
+
+                status_map = {'connected': '✅ Conectado', 'firewalled': '⚠️ Cortafuegos', 'disconnected': '❌ Desconectado'}
+                connection_status = status_map.get(server_state.connection_status, '❓ Desconocido')
+                dht_nodes = server_state.dht_nodes
+                alt_speed_status = "🟢 ACTIVADO" if server_state.use_alt_speed_limits else "🔴 DESACTIVADO"
+
+                num_seeding = len([t for t in all_torrents if t.state == 'uploading' or t.state == 'stalledUP'])
+                num_paused = len([t for t in all_torrents if t.state == 'pausedUP' or t.state == 'pausedDL'])
+                num_stalled_dl = len([t for t in all_torrents if t.state == 'stalledDL'])
+                
+                main_free_space = formato_tamano(server_state.free_space_on_disk)
+
+                # --- LÍNEAS MODIFICADAS ---
+                # En lugar de usar el valor global de la API, sumamos las velocidades individuales
+                dl_speed = formato_velocidad(sum(t.dlspeed for t in all_torrents))
+                up_speed = formato_velocidad(sum(t.upspeed for t in all_torrents))
+                # --- FIN DE LA MODIFICACIÓN ---
+                
+                mensaje = (
+                    f"📊 <b><u>Estado de qBittorrent v{qb_version}</u></b> 📊\n\n"
+                    f"📡 <b>Conexión:</b> <code>{connection_status} ({dht_nodes} nodos DHT)</code>\n"
+                    f"🐢 <b>Límite Alt.:</b> <code>{alt_speed_status}</code>\n"
+                    f"💾 <b>Espacio Libre (principal):</b> <code>{main_free_space}</code>\n"
+                    f"{category_section_str}\n"
+                    f"🔄 <b><u>Sesión Actual</u></b>\n"
+                    f"  <b>Ratio Global:</b> <code>{global_ratio}</code>\n"
+                    f"  <b>Descargado:</b> <code>{session_download}</code>\n"
+                    f"  <b>Subido:</b> <code>{session_upload}</code>\n\n"
+                    f"🚀 <b><u>Velocidad Global</u></b>\n"
+                    f"  <b>Descarga:</b> <code>{dl_speed}</code>\n"
+                    f"  <b>Subida:</b> <code>{up_speed}</code>\n\n"
+                    f"📝 <b><u>Resumen de Torrents</u></b>\n"
+                    f"  📥 <b>Descargando:</b> <code>{len([t for t in all_torrents if 'DL' in t.state.upper()])}</code>\n"
+                    f"  🌱 <b>Sedeando:</b> <code>{num_seeding}</code>\n"
+                    f"  ⏸️ <b>Pausados:</b> <code>{num_paused}</code>\n"
+                    f"  ⚠️ <b>Estancados (DL):</b> <code>{num_stalled_dl}</code>\n"
+                )
+                
+            except Exception as e:
+                mensaje = f"❌ <b>Error al actualizar estado:</b>\n<code>{e}</code>\n\nReintentando..."
+                print(f"Error en el bucle de update_status_panel: {e}")
+
+            buttons = [[Button.inline("Cerrar Panel ❌", b"close_status")]]
+            
+            if status_panel_message:
+                await status_panel_message.edit(mensaje, parse_mode="html", buttons=buttons)
+            else:
+                status_panel_message = await event.reply(mensaje, parse_mode="html", buttons=buttons)
+
+            await asyncio.sleep(10)
+
+    except asyncio.CancelledError:
+        if status_panel_message:
+            try:
+                await status_panel_message.delete()
+            except Exception:
+                pass
+        print("Panel de estado cerrado correctamente por el usuario.")
+    finally:
+        status_panel_message = None
+
+async def update_downloads_panel(event):
+    global downloads_panel_message
+
+    # --- AÑADIDO: Guardar el tiempo de inicio ---
+    start_time = asyncio.get_event_loop().time()
+    timeout_seconds = 120  # 2 minutos
+
+    try:
+        while True:
+            # --- AÑADIDO: Comprobar si ha pasado el tiempo ---
+            if asyncio.get_event_loop().time() - start_time > timeout_seconds:
+                print("Panel de descargas cerrado por timeout.")
+                if downloads_panel_message:
+                    try:
+                        await downloads_panel_message.delete()
+                    except Exception:
+                        pass
+                break # Salir del bucle para terminar la tarea
+
+            try:
+                torrents = qb.torrents_info(filter="downloading")
+            except qbittorrentapi.APIConnectionError:
+                error_message = "⚠️ No se puede conectar con qBittorrent. Reintentando..."
+                buttons = [[Button.inline("Cerrar Panel ❌", b"close_panel")]]
+                if downloads_panel_message:
+                    await downloads_panel_message.edit(error_message, buttons=buttons)
+                else:
+                    downloads_panel_message = await event.reply(error_message, buttons=buttons)
+                
+                await asyncio.sleep(10)
+                continue
+
+            buttons = [[Button.inline("Cerrar Panel ❌", b"close_panel")]]
+            
+            if not torrents:
+                mensaje = "✅ No hay descargas activas en este momento."
+            else:
+                mensaje = "📂 <b>Descargas en curso:</b>\n\n"
+                total_segments = 12
+                for t in sorted(torrents, key=lambda x: x.name):
+                    filled = int(t.progress * total_segments)
+                    bar = "🟦" * filled + "⬜" * (total_segments - filled)
+                    nombre_corto = html.escape(abreviar_nombre(t.name))
+                    porcentaje = f"{t.progress * 100:.1f}%"
+                    velocidad = formato_velocidad(t.dlspeed)
+                    mensaje += f"🎬 <code>{nombre_corto}</code>\n{bar}\n<b>{porcentaje}</b>  🚀 <b>{velocidad}</b>\n"
+
+            try:
+                if downloads_panel_message:
+                    await downloads_panel_message.edit(mensaje, parse_mode="html", buttons=buttons)
+                else:
+                    downloads_panel_message = await event.reply(mensaje, parse_mode="html", buttons=buttons)
+            except Exception:
+                break
+
+            await asyncio.sleep(10)
+
+    except asyncio.CancelledError:
+        if downloads_panel_message:
+            try:
+                await downloads_panel_message.delete()
+            except Exception:
+                pass
+        print("Panel de descargas cerrado correctamente por el usuario.")
+    finally:
+        downloads_panel_message = None
+
+
 @bot.on(events.NewMessage(pattern="/descargas"))
 async def listar_descargas(event):
+    await event.delete()
+    global downloads_panel_task
     if event.chat_id != CHAT_ID:
         return
-    try:
-        torrents_descargando = [t for t in qb.torrents_info(filter="downloading")]
-        if not torrents_descargando:
-            await event.reply("⚠️ No hay descargas activas.", parse_mode="html")
-            return
-        mensaje = "📂 <b>Descargas en curso:</b>\n\n"
-        for t in torrents_descargando:
-            mensaje += (
-                f"🎬 <b>{html.escape(t.name)}</b>\n"
-                f"📊 <b>{t.progress * 100:.2f}%</b> | 📏 <b>{formato_tamano(t.size)}</b>\n"
-                f"⚡️ <b>{t.dlspeed / 1e6:.2f} MB/s</b> ↓ | 🚀 <b>{t.upspeed / 1e6:.2f} MB/s</b> ↑\n"
-                f"🌱 Semillas: <b>{t.num_seeds}</b> | 🚀 Pares: <b>{t.num_leechs}</b>\n"
-                f"📂 <b>Guardado en:</b> <code>{html.escape(t.save_path)}</code>\n"
-                f"------------------------------------------------\n\n"
-            )
-        await enviar_mensaje(event.chat_id, mensaje)
-    except qbittorrentapi.APIConnectionError:
-        await event.reply("⚠️ No se puede obtener la lista de descargas, qBittorrent no está accesible.", parse_mode="html")
+
+    # Evita abrir múltiples paneles
+    if downloads_panel_task and not downloads_panel_task.done():
+        await event.reply("⚠️ Un panel de descargas ya está activo.", parse_mode="html")
+        return
+
+    # Lanza la tarea que se encargará de actualizar el mensaje
+    downloads_panel_task = asyncio.create_task(update_downloads_panel(event))
+
+@bot.on(events.NewMessage(pattern="/status"))
+async def show_status(event):
+    await event.delete()
+    global status_panel_task
+    if event.chat_id != CHAT_ID:
+        return
+
+    # Evita abrir múltiples paneles de estado
+    if status_panel_task and not status_panel_task.done():
+        await event.reply("⚠️ Un panel de estado ya está activo.", parse_mode="html")
+        return
+
+    # Lanza la tarea que se encargará de actualizar el panel de estado
+    status_panel_task = asyncio.create_task(update_status_panel(event))
 
 # --- Monitorización de qBittorrent: lanza tareas para torrents nuevos ---
 async def monitorear_qbittorrent():
@@ -377,5 +606,6 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
+
 
 
