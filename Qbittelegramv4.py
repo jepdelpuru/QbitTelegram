@@ -546,9 +546,14 @@ async def update_status_panel(event):
                 connection_status = status_map.get(server_state.connection_status, '❓ Desconocido')
                 dht_nodes = server_state.dht_nodes
                 alt_speed_status = "🟢 ACTIVADO" if server_state.use_alt_speed_limits else "🔴 DESACTIVADO"
-                num_seeding = len([t for t in all_torrents if t.state in ['uploading', 'stalledUP']])
-                num_paused = len([t for t in all_torrents if t.state in ['pausedUP', 'pausedDL']])
+                num_downloading = len([t for t in all_torrents if t.state in ['downloading', 'forceDL', 'metaDL']])
+                # Sedeando (incluye subida normal y forzada)
+                num_seeding = len([t for t in all_torrents if t.state in ['uploading', 'stalledUP', 'forceUP']])
+                # Pausados (lógica flexible que busca 'paused' en el estado)
+                num_paused = len([t for t in all_torrents if t.state in ['stoppedDL']])
+                # Estancados (sin cambios)
                 num_stalled_dl = len([t for t in all_torrents if t.state == 'stalledDL'])
+                
                 main_free_space = formato_tamano(server_state.free_space_on_disk)
                 dl_speed = formato_velocidad(sum(t.dlspeed for t in all_torrents))
                 up_speed = formato_velocidad(sum(t.upspeed for t in all_torrents))
@@ -569,7 +574,7 @@ async def update_status_panel(event):
                     f"  <b>Descarga:</b> <code>{dl_speed}</code>\n"
                     f"  <b>Subida:</b> <code>{up_speed}</code>\n\n"
                     f"📝 <b><u>Resumen de Torrents</u></b>\n"
-                    f"  📥 <b>Descargando:</b> <code>{len([t for t in all_torrents if 'DL' in t.state.upper() and 'PAUSED' not in t.state.upper()])}</code>\n"
+                    f"  📥 <b>Descargando:</b> <code>{num_downloading}</code>\n"
                     f"  🌱 <b>Sedeando:</b> <code>{num_seeding}</code>\n"
                     f"  ⏸️ <b>Pausados:</b> <code>{num_paused}</code>\n"
                     f"  ⚠️ <b>Estancados (DL):</b> <code>{num_stalled_dl}</code>\n"
@@ -751,6 +756,7 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
+
 
 
 
