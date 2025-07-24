@@ -6,16 +6,27 @@ from telethon.tl.types import DocumentAttributeFilename
 import os
 import collections
 from telethon.errors.rpcerrorlist import MessageNotModifiedError
+from urllib.parse import urlparse
 
 # 🔹 Configuración del bot de Telegram
-API_ID = xxxxx
-API_HASH = "xxxxx"
-BOT_TOKEN = "xxxxxx"
-CHAT_ID = xxxxxx
+API_ID = XXXXXXXX
+API_HASH = "XXXXXXXXXXX"
+BOT_TOKEN = "XXXXXXXXXX"
+CHAT_ID = XXXXXXXX
 
 # 🔹 Configuración de qBittorrent
 QB_HOST = "http://192.168.0.160:6363"
 
+#PONER TRACKERS QUE SE QUIEREN MONITORIZAR
+PRIVATE_TRACKER_DOMAINS = [
+    "xxxxxxxx",
+    "xxxxxx",
+    "xxxxxxxx",
+    "xxxxxxxx",
+    "xxxxxxxx.cx",
+    "xxxxx.com",
+    "tracker.xxxxxx.org"
+]
 
 
 # 🔹 Variables globales para la conexión y control
@@ -429,7 +440,7 @@ async def update_status_panel(event):
     global status_panel_message
     
     start_time = asyncio.get_event_loop().time()
-    timeout_seconds = 120
+    timeout_seconds = 240
 
     try:
         while True:
@@ -468,7 +479,65 @@ async def update_status_panel(event):
                     for name, count in sorted(category_counts.items()):
                         display_name = "Sin Categoría" if name == "" else html.escape(name)
                         category_items.append(f"  <b>{display_name}:</b> <code>{count} torrents</code>")
-                category_section_str = "\n📂 <b><u>Torrents por Categoría</u></b>\n" + "\n".join(category_items) + "\n" if category_items else ""
+                
+                category_section_str = "\n📂 <b><u>Torrents por Categoría</u></b>\n" + "\n".join(category_items) if category_items else ""
+                tracker_stats = collections.defaultdict(lambda: {'count': 0, 'uploaded': 0, 'downloaded': 0, 'status_codes': [], 'seeding_count': 0})
+
+                for torrent in all_torrents:
+                    found_private_domains = set()
+                    for tracker in torrent.trackers:
+                        try:
+                            domain = urlparse(tracker['url']).hostname
+                            if domain and domain in PRIVATE_TRACKER_DOMAINS:
+                                found_private_domains.add(domain)
+                                tracker_stats[domain]['status_codes'].append(tracker['status'])
+                        except Exception:
+                            continue
+                    
+                    # 2. Comprobamos si el torrent está sedeando
+                    is_seeding = torrent.state in ['uploading', 'stalledUP']
+
+                    for domain in found_private_domains:
+                        stats = tracker_stats[domain]
+                        stats['count'] += 1
+                        stats['uploaded'] += torrent.uploaded
+                        stats['downloaded'] += torrent.downloaded
+                        # 3. Incrementamos el contador si está sedeando
+                        if is_seeding:
+                            stats['seeding_count'] += 1
+                
+                private_trackers_section_str = ""
+                if tracker_stats:
+                    items = []
+                    for domain, stats in sorted(tracker_stats.items()):
+                        statuses = stats['status_codes']
+                        status_icon = '🟢'
+                        if statuses:
+                            all_working = all(s == 2 for s in statuses)
+                            any_working = any(s == 2 for s in statuses)
+                            if all_working: status_icon = '🟢'
+                            elif any_working: status_icon = '🟡'
+                            else: status_icon = '🔴'
+                        
+                        ratio = stats['uploaded'] / stats['downloaded'] if stats['downloaded'] > 0 else float('inf')
+                        ratio_str = f"{ratio:.2f}" if ratio != float('inf') else "∞"
+                        up_str = formato_tamano(stats['uploaded'])
+                        down_str = formato_tamano(stats['downloaded'])
+                        
+                        # --- 4. NUEVO FORMATO DEL MENSAJE ---
+                        # Añadimos el contador de seeding a la línea principal de forma compacta
+                        seeding_str = f" (🌱{stats['seeding_count']})" if stats['seeding_count'] > 0 else ""
+                        count_str = f"{stats['count']} torrents{seeding_str}"
+
+                        line = (
+                            f"{status_icon} <b>{domain}:</b> <code>{count_str}</code>\n"
+                            f"   - 📤 <code>{up_str}</code> | 📥 <code>{down_str}</code>\n"
+                            f"   - ⚖️ <b>Ratio:</b> <code>{ratio_str}</code>"
+                        )
+                        items.append(line)
+                    
+                    private_trackers_section_str = "\n\n🔑 <b><u>Trackers Privados Activos</u></b>\n" + "\n".join(items)
+
                 session_download = formato_tamano(server_state.dl_info_data)
                 session_upload = formato_tamano(server_state.up_info_data)
                 ratio_val = server_state.global_ratio
@@ -487,11 +556,12 @@ async def update_status_panel(event):
                 mensaje = (
                     f"📊 <b><u>Estado de qBittorrent v{qb_version}</u></b> 📊"
                     f"{pause_status_str}"  # Mensaje de pausa se inserta aquí
-                    f"📡 <b>Conexión:</b> <code>{connection_status} ({dht_nodes} nodos DHT)</code>\n"
+                    f"\n\n📡 <b>Conexión:</b> <code>{connection_status} ({dht_nodes} nodos DHT)</code>\n"
                     f"🐢 <b>Límite Alt.:</b> <code>{alt_speed_status}</code>\n"
                     f"💾 <b>Espacio Libre (principal):</b> <code>{main_free_space}</code>\n"
                     f"{category_section_str}"
-                    f"\n🔄 <b><u>Sesión Actual</u></b>\n"
+                    f"{private_trackers_section_str}"
+                    f"\n\n🔄 <b><u>Sesión Actual</u></b>\n"
                     f"  <b>Ratio Global:</b> <code>{global_ratio}</code>\n"
                     f"  <b>Descargado:</b> <code>{session_download}</code>\n"
                     f"  <b>Subido:</b> <code>{session_upload}</code>\n\n"
@@ -681,6 +751,7 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
+
 
 
 
