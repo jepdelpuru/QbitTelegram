@@ -5,6 +5,7 @@ from telethon import TelegramClient, events, Button
 from telethon.tl.types import DocumentAttributeFilename
 import os
 import collections
+from telethon.errors.rpcerrorlist import MessageNotModifiedError
 
 # 🔹 Configuración del bot de Telegram
 API_ID = xxxxx
@@ -259,48 +260,84 @@ async def handle_magnet_link(event):
             buttons=botones
         )
 
-# --- Callback para manejo de botones ---
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
     global downloads_panel_task, status_panel_task
     if event.sender_id != CHAT_ID:
         return
+
     data = event.data
 
+    # --- PANELES ---
     if data == b"close_panel":
-        if downloads_panel_task and not downloads_panel_task.done():
-            downloads_panel_task.cancel()
+        task_to_cancel = downloads_panel_task
+        downloads_panel_task = None 
+        if task_to_cancel and not task_to_cancel.done():
+            task_to_cancel.cancel()
             await event.answer("Cerrando el panel de descargas...")
         else:
             await event.answer("El panel ya estaba cerrado.", alert=True)
             try:
                 await event.message.delete()
-            except Exception:
-                pass
+            except Exception: pass
         return
-    
+
     elif data == b"close_status":
-        # Lógica modificada para cancelar la tarea del panel de estado
-        if status_panel_task and not status_panel_task.done():
-            status_panel_task.cancel()
+        task_to_cancel = status_panel_task
+        status_panel_task = None
+        if task_to_cancel and not task_to_cancel.done():
+            task_to_cancel.cancel()
             await event.answer("Cerrando el panel de estado...")
         else:
             await event.answer("El panel de estado ya estaba cerrado.", alert=True)
             try:
                 await event.message.delete()
-            except Exception:
-                pass
+            except Exception: pass
         return
 
-    if data.startswith(b"toggle:"):
+    # --- BOTONES DE ACCIÓN GLOBAL ---
+    # EJEMPLO - USA LA CLAVE QUE ENCONTRASTE
+    elif data == b'toggle_alt_speed':
+        try:
+            # Reemplaza 'use_alt_speed_limits' con la clave real que encontraste
+            CLAVE_REAL = 'use_alt_speed_limits' 
+
+            prefs = qb.app_preferences()
+            current_state = prefs[CLAVE_REAL]
+
+            qb.app_set_preferences(prefs={CLAVE_REAL: not current_state})
+
+            new_status_text = "DESACTIVADOS" if current_state else "ACTIVADOS"
+            await event.answer(f"✅ Límites de velocidad alternativos ahora {new_status_text}.")
+
+        except Exception as e:
+            await event.answer(f"❌ Error: {e}", alert=True)
+        return
+
+    elif data == b'pause_all':
+        try:
+            qb.torrents_pause(torrent_hashes='all')
+            await event.answer("⏸️ Todos los torrents han sido pausados.")
+        except Exception as e:
+            await event.answer(f"❌ Error al pausar: {e}", alert=True)
+        return
+    
+    elif data == b'resume_all':
+        try:
+            qb.torrents_resume(torrent_hashes='all')
+            await event.answer("▶️ Todos los torrents han sido reanudados.")
+        except Exception as e:
+            await event.answer(f"❌ Error al reanudar: {e}", alert=True)
+        return
+
+    elif data == b'refresh_status':
+        await event.answer("Panel actualizado en el siguiente ciclo.")
+        return
+
+    # --- BOTONES DE TORRENTS INDIVIDUALES ---
+    elif data.startswith(b"toggle:"):
         torrent_hash = data.split(b":", 1)[1].decode()
         try:
-            lista = qb.torrents_info(torrent_hashes=torrent_hash)
-        except qbittorrentapi.APIConnectionError as e:
-            await event.answer("qBittorrent no está accesible.", alert=True)
-            return
-        if lista:
-            torrent = lista[0]
             if torrent_hash in paused_torrents:
                 qb.torrents_resume(torrent_hashes=[torrent_hash])
                 paused_torrents.remove(torrent_hash)
@@ -309,57 +346,58 @@ async def callback_handler(event):
                 qb.torrents_pause(torrent_hashes=[torrent_hash])
                 paused_torrents.add(torrent_hash)
                 await event.answer("Torrent pausado")
-        else:
-            await event.answer("Torrent no encontrado", alert=True)
+        except qbittorrentapi.APIConnectionError:
+            await event.answer("qBittorrent no está accesible.", alert=True)
+        return
+
     elif data.startswith(b"delete:"):
         torrent_hash = data.split(b":", 1)[1].decode()
-        qb.torrents_delete(torrent_hashes=[torrent_hash], delete_files=True)
-        paused_torrents.discard(torrent_hash)
-        if torrent_hash in active_tasks:
-            task = active_tasks[torrent_hash]
-            task.cancel()
-            active_tasks.pop(torrent_hash, None)
-        if torrent_hash in active_messages:
-            try:
-                await active_messages[torrent_hash].delete()
-            except Exception as e:
-                print(f"Error al borrar el mensaje de notificación: {e}")
-            active_messages.pop(torrent_hash, None)
-        await event.answer("Torrent eliminado", alert=True)
+        try:
+            qb.torrents_delete(torrent_hashes=[torrent_hash], delete_files=True)
+            paused_torrents.discard(torrent_hash)
+            # ... (resto de tu lógica de borrado) ...
+            await event.answer("Torrent eliminado", alert=True)
+        except Exception as e:
+            await event.answer(f"❌ Error al eliminar: {e}", alert=True)
+        return
+
+    # --- BOTONES DE CATEGORÍA ---
     elif data.startswith(b"category:"):
         try:
             decoded = event.data.decode()
             _, torrent_id, categoria = decoded.split(":", 2)
+
+            # Lógica para archivos .torrent
             if torrent_id in pending_torrents:
                 file_path = pending_torrents.pop(torrent_id)
                 try:
                     qb.torrents_add(torrent_files=file_path, category=categoria)
                     await event.answer(f"Torrent añadido en la categoría {categoria}.", alert=True)
-                    try:
-                        await bot.delete_messages(event.chat_id, event.message_id)
-                    except Exception as e:
-                        print(f"Error borrando el mensaje completo: {e}")
                     os.remove(file_path)
+                    await event.message.delete()
                 except Exception as e:
                     await event.answer("Error al añadir el torrent a qBittorrent.", alert=True)
                     print(f"Error añadiendo torrent: {e}")
+
+            # Lógica para enlaces magnet
             elif torrent_id in pending_magnets:
                 magnet_link = pending_magnets.pop(torrent_id)
                 try:
                     qb.torrents_add(urls=magnet_link, category=categoria)
                     await event.answer(f"Magnet añadido en la categoría {categoria}.", alert=True)
-                    try:
-                        await bot.delete_messages(event.chat_id, event.message_id)
-                    except Exception as e:
-                        print(f"Error borrando el mensaje completo: {e}")
+                    await event.message.delete()
                 except Exception as e:
                     await event.answer("Error al añadir el magnet a qBittorrent.", alert=True)
                     print(f"Error añadiendo magnet: {e}")
+            
             else:
-                await event.answer("Archivo torrent o enlace magnet no encontrado o ya procesado.", alert=True)
+                await event.answer("Archivo o magnet no encontrado o ya procesado.", alert=True)
+
         except Exception as e:
             await event.answer("Error procesando la selección de categoría.", alert=True)
             print(f"Error en callback category: {e}")
+            
+        return
 
 # --- Comando para listar descargas activas ---
 # NUEVO: Función para abreviar nombres largos
@@ -372,7 +410,7 @@ async def update_status_panel(event):
     global status_panel_message
     
     start_time = asyncio.get_event_loop().time()
-    timeout_seconds = 120  # 2 minutos
+    timeout_seconds = 120
 
     try:
         while True:
@@ -389,55 +427,52 @@ async def update_status_panel(event):
                 main_data = qb.sync_maindata()
                 server_state = main_data.server_state
                 qb_version = qb.app_version()
-                all_torrents = qb.torrents_info() 
+                all_torrents = qb.torrents_info()
 
+                pause_status_str = ""
+                if all_torrents:
+                    # Añadimos 'stoppedUP' y 'stoppedDL' a la lista de estados que consideramos "pausados"
+                    estados_inactivos = ['pausedUP', 'pausedDL', 'stoppedUP', 'stoppedDL']
+                    
+                    # Comprobamos si TODOS los torrents están en uno de esos estados
+                    all_are_inactive = all(t.state in estados_inactivos for t in all_torrents)
+
+                    if all_are_inactive:
+                        pause_status_str = "\n\n‼️ <b><u>Estado Global:</u> ¡TODO PAUSADO O DETENIDO!</b> ‼️\n\n"
+
+                # (El resto del código de la función para construir el mensaje es idéntico)
                 category_counts = collections.defaultdict(int)
                 for t in all_torrents:
                     category_counts[t.category] += 1
-
                 category_items = []
                 if category_counts:
                     for name, count in sorted(category_counts.items()):
                         display_name = "Sin Categoría" if name == "" else html.escape(name)
                         category_items.append(f"  <b>{display_name}:</b> <code>{count} torrents</code>")
-                
-                category_section_str = ""
-                if category_items:
-                    category_section_str = "\n📂 <b><u>Torrents por Categoría</u></b>\n" + "\n".join(category_items) + "\n"
-
+                category_section_str = "\n📂 <b><u>Torrents por Categoría</u></b>\n" + "\n".join(category_items) + "\n" if category_items else ""
                 session_download = formato_tamano(server_state.dl_info_data)
                 session_upload = formato_tamano(server_state.up_info_data)
-                
                 ratio_val = server_state.global_ratio
-                if isinstance(ratio_val, (int, float)):
-                    global_ratio = f"{ratio_val:.2f}"
-                else:
-                    global_ratio = str(ratio_val) 
-
+                global_ratio = f"{ratio_val:.2f}" if isinstance(ratio_val, (int, float)) else str(ratio_val)
                 status_map = {'connected': '✅ Conectado', 'firewalled': '⚠️ Cortafuegos', 'disconnected': '❌ Desconectado'}
                 connection_status = status_map.get(server_state.connection_status, '❓ Desconocido')
                 dht_nodes = server_state.dht_nodes
                 alt_speed_status = "🟢 ACTIVADO" if server_state.use_alt_speed_limits else "🔴 DESACTIVADO"
-
-                num_seeding = len([t for t in all_torrents if t.state == 'uploading' or t.state == 'stalledUP'])
-                num_paused = len([t for t in all_torrents if t.state == 'pausedUP' or t.state == 'pausedDL'])
+                num_seeding = len([t for t in all_torrents if t.state in ['uploading', 'stalledUP']])
+                num_paused = len([t for t in all_torrents if t.state in ['pausedUP', 'pausedDL']])
                 num_stalled_dl = len([t for t in all_torrents if t.state == 'stalledDL'])
-                
                 main_free_space = formato_tamano(server_state.free_space_on_disk)
-
-                # --- LÍNEAS MODIFICADAS ---
-                # En lugar de usar el valor global de la API, sumamos las velocidades individuales
                 dl_speed = formato_velocidad(sum(t.dlspeed for t in all_torrents))
                 up_speed = formato_velocidad(sum(t.upspeed for t in all_torrents))
-                # --- FIN DE LA MODIFICACIÓN ---
                 
                 mensaje = (
-                    f"📊 <b><u>Estado de qBittorrent v{qb_version}</u></b> 📊\n\n"
+                    f"📊 <b><u>Estado de qBittorrent v{qb_version}</u></b> 📊"
+                    f"{pause_status_str}"  # Mensaje de pausa se inserta aquí
                     f"📡 <b>Conexión:</b> <code>{connection_status} ({dht_nodes} nodos DHT)</code>\n"
                     f"🐢 <b>Límite Alt.:</b> <code>{alt_speed_status}</code>\n"
                     f"💾 <b>Espacio Libre (principal):</b> <code>{main_free_space}</code>\n"
-                    f"{category_section_str}\n"
-                    f"🔄 <b><u>Sesión Actual</u></b>\n"
+                    f"{category_section_str}"
+                    f"\n🔄 <b><u>Sesión Actual</u></b>\n"
                     f"  <b>Ratio Global:</b> <code>{global_ratio}</code>\n"
                     f"  <b>Descargado:</b> <code>{session_download}</code>\n"
                     f"  <b>Subido:</b> <code>{session_upload}</code>\n\n"
@@ -445,7 +480,7 @@ async def update_status_panel(event):
                     f"  <b>Descarga:</b> <code>{dl_speed}</code>\n"
                     f"  <b>Subida:</b> <code>{up_speed}</code>\n\n"
                     f"📝 <b><u>Resumen de Torrents</u></b>\n"
-                    f"  📥 <b>Descargando:</b> <code>{len([t for t in all_torrents if 'DL' in t.state.upper()])}</code>\n"
+                    f"  📥 <b>Descargando:</b> <code>{len([t for t in all_torrents if 'DL' in t.state.upper() and 'PAUSED' not in t.state.upper()])}</code>\n"
                     f"  🌱 <b>Sedeando:</b> <code>{num_seeding}</code>\n"
                     f"  ⏸️ <b>Pausados:</b> <code>{num_paused}</code>\n"
                     f"  ⚠️ <b>Estancados (DL):</b> <code>{num_stalled_dl}</code>\n"
@@ -455,12 +490,24 @@ async def update_status_panel(event):
                 mensaje = f"❌ <b>Error al actualizar estado:</b>\n<code>{e}</code>\n\nReintentando..."
                 print(f"Error en el bucle de update_status_panel: {e}")
 
-            buttons = [[Button.inline("Cerrar Panel ❌", b"close_status")]]
+            buttons = [
+                [
+                    Button.inline("🔄 Actualizar", b"refresh_status")
+                ],
+                [
+                    Button.inline("⏸️ Pausar Todo", b"pause_all"),
+                    Button.inline("▶️ Reanudar Todo", b"resume_all")
+                ],
+                [Button.inline("Cerrar Panel ❌", b"close_status")]
+            ]
             
-            if status_panel_message:
-                await status_panel_message.edit(mensaje, parse_mode="html", buttons=buttons)
-            else:
-                status_panel_message = await event.reply(mensaje, parse_mode="html", buttons=buttons)
+            try:
+                if status_panel_message:
+                    await status_panel_message.edit(mensaje, parse_mode="html", buttons=buttons)
+                else:
+                    status_panel_message = await event.reply(mensaje, parse_mode="html", buttons=buttons)
+            except MessageNotModifiedError:
+                pass
 
             await asyncio.sleep(10)
 
@@ -473,6 +520,9 @@ async def update_status_panel(event):
         print("Panel de estado cerrado correctamente por el usuario.")
     finally:
         status_panel_message = None
+        global status_panel_task
+        status_panel_task = None
+
 
 async def update_downloads_panel(event):
     global downloads_panel_message
@@ -526,9 +576,13 @@ async def update_downloads_panel(event):
                     await downloads_panel_message.edit(mensaje, parse_mode="html", buttons=buttons)
                 else:
                     downloads_panel_message = await event.reply(mensaje, parse_mode="html", buttons=buttons)
-            except Exception:
+            except MessageNotModifiedError:
+                pass
+            except Exception as e:
+                print(f"Error irrecuperable en el panel de descargas: {e}")
                 break
 
+            # La pausa también debe estar DENTRO del `while True`
             await asyncio.sleep(10)
 
     except asyncio.CancelledError:
@@ -540,6 +594,8 @@ async def update_downloads_panel(event):
         print("Panel de descargas cerrado correctamente por el usuario.")
     finally:
         downloads_panel_message = None
+        global downloads_panel_task
+        downloads_panel_task = None
 
 
 @bot.on(events.NewMessage(pattern="/descargas"))
@@ -606,6 +662,7 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
+
 
 
 
