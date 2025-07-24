@@ -278,7 +278,7 @@ async def callback_handler(event):
         else:
             await event.answer("El panel ya estaba cerrado.", alert=True)
             try:
-                await event.message.delete()
+                await event.delete()
             except Exception: pass
         return
 
@@ -353,12 +353,31 @@ async def callback_handler(event):
     elif data.startswith(b"delete:"):
         torrent_hash = data.split(b":", 1)[1].decode()
         try:
-            qb.torrents_delete(torrent_hashes=[torrent_hash], delete_files=True)
+            # --- Bloque para qBittorrent ---
+            # Intentamos eliminar el torrent, pero no dejamos que un error aquí detenga el proceso.
+            try:
+                qb.torrents_delete(torrent_hashes=[torrent_hash], delete_files=True)
+            except qbittorrentapi.NotFound404Error:
+                # Esto es normal si el torrent ya fue borrado manualmente. Lo ignoramos.
+                print(f"Info: Se intentó borrar el torrent {torrent_hash}, pero ya no existía en qBittorrent.")
+            except Exception as e:
+                # Otro error de qBittorrent, lo registramos pero continuamos para borrar el mensaje.
+                print(f"Error borrando el torrent de qBittorrent: {e}")
+
+            # --- Bloque para Telegram y estado del bot ---
+            # Limpiamos el estado interno del bot (siempre)
             paused_torrents.discard(torrent_hash)
-            # ... (resto de tu lógica de borrado) ...
-            await event.answer("Torrent eliminado", alert=True)
+            active_tasks.pop(torrent_hash, None)
+            active_messages.pop(torrent_hash, None)
+            
+            # Respondemos al usuario y borramos el mensaje (siempre)
+            await event.answer("Acción completada. Mensaje eliminado.", alert=True)
+            await event.delete()
+            
         except Exception as e:
-            await event.answer(f"❌ Error al eliminar: {e}", alert=True)
+            # Este 'except' general es para errores de Telegram (ej. al borrar el mensaje)
+            await event.answer(f"❌ Error al procesar la acción en Telegram: {e}", alert=True)
+            print(f"Error en callback delete (lado de Telegram): {e}")
         return
 
     # --- BOTONES DE CATEGORÍA ---
@@ -374,7 +393,7 @@ async def callback_handler(event):
                     qb.torrents_add(torrent_files=file_path, category=categoria)
                     await event.answer(f"Torrent añadido en la categoría {categoria}.", alert=True)
                     os.remove(file_path)
-                    await event.message.delete()
+                    await event.delete()
                 except Exception as e:
                     await event.answer("Error al añadir el torrent a qBittorrent.", alert=True)
                     print(f"Error añadiendo torrent: {e}")
@@ -385,7 +404,7 @@ async def callback_handler(event):
                 try:
                     qb.torrents_add(urls=magnet_link, category=categoria)
                     await event.answer(f"Magnet añadido en la categoría {categoria}.", alert=True)
-                    await event.message.delete()
+                    await event.delete()
                 except Exception as e:
                     await event.answer("Error al añadir el magnet a qBittorrent.", alert=True)
                     print(f"Error añadiendo magnet: {e}")
