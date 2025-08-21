@@ -5,27 +5,28 @@ from telethon import TelegramClient, events, Button
 from telethon.tl.types import DocumentAttributeFilename
 import os
 import collections
+import json
 from telethon.errors.rpcerrorlist import MessageNotModifiedError
 from urllib.parse import urlparse
 
 # 🔹 Configuración del bot de Telegram
-API_ID = XXXXXXXX
-API_HASH = "XXXXXXXXXXX"
-BOT_TOKEN = "XXXXXXXXXX"
-CHAT_ID = XXXXXXXX
+API_ID = xxxxxxxx
+API_HASH = "xxxxxxxxx"
+BOT_TOKEN = "xxxxxxxx"
+CHAT_ID = xxxxxx
 
 # 🔹 Configuración de qBittorrent
 QB_HOST = "http://192.168.0.160:6363"
 
-#PONER TRACKERS QUE SE QUIEREN MONITORIZAR
+# trackers para monitorear en nuevo panel /status
 PRIVATE_TRACKER_DOMAINS = [
-    "xxxxxxxx",
-    "xxxxxx",
-    "xxxxxxxx",
-    "xxxxxxxx",
+    "xxxxxxx.li",
+    "xxxxx.org",
+    "xxxxxxx.club",
+    "xxxxxxxx.li",
     "xxxxxxxx.cx",
-    "xxxxx.com",
-    "tracker.xxxxxx.org"
+    "xxxxxxx.com",
+    "tracker.xxxxxxx.org"
 ]
 
 
@@ -40,6 +41,7 @@ downloads_panel_message = None # Almacena el mensaje del panel para poder editar
 downloads_panel_task = None    # Almacena la tarea de actualización del panel
 status_panel_message = None    # Almacena el mensaje del panel de estado
 status_panel_task = None       # Almacena la tarea de actualización del estado
+STATE_FILE = "bot_state.json"
 
 
 # --- Función para conectar con qBittorrent ---
@@ -76,6 +78,29 @@ def formato_tamano(size_bytes):
     else:
         return f"{size_bytes / 1e3:.2f} KB"
 
+# --- Funciones para manejar el estado del bot ---
+def guardar_estado():
+    """Guarda el diccionario active_messages en un archivo JSON."""
+    # Guardamos solo los IDs, no el objeto completo del mensaje
+    estado_para_guardar = {h: m.id for h, m in active_messages.items()}
+    try:
+        with open(STATE_FILE, 'w') as f:
+            json.dump(estado_para_guardar, f, indent=4)
+        # print(f"💾 Estado guardado en {STATE_FILE}") # Opcional: para depuración
+    except Exception as e:
+        print(f"❌ Error al guardar el estado: {e}")
+
+def cargar_estado():
+    """Carga el diccionario de hash -> message_id desde un archivo JSON."""
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, 'r') as f:
+                print(f"✅ Estado cargado desde {STATE_FILE}")
+                return {h: int(mid) for h, mid in json.load(f).items()}
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"⚠️ No se pudo cargar el estado o el archivo está vacío: {e}")
+    return {}
+
 # --- Función para dividir mensajes largos ---
 async def enviar_mensaje(chat_id, mensaje):
     MAX_TAMANIO_MENSAJE = 4000
@@ -84,56 +109,58 @@ async def enviar_mensaje(chat_id, mensaje):
         await bot.send_message(chat_id, parte, parse_mode="html")
 
 # --- Función de notificación dinámica para cada torrent ---
-async def notificar_descarga(torrent_hash):
+async def notificar_descarga(torrent_hash, existing_message=None):
     global qb
     total_segments = 17  # Barra de progreso
-
-    while True:
-        try:
-            lista = qb.torrents_info(torrent_hashes=torrent_hash)
-            if lista:
-                torrent = lista[0]
-                break
-            else:
-                return
-        except qbittorrentapi.APIConnectionError as e:
-            print(f"⚠️ qBittorrent no accesible al obtener info del torrent {torrent_hash}: {e}. Reintentando...")
-            qb = await conectar_qbittorrent()
-            await asyncio.sleep(5)
-    
-    if torrent_hash in paused_torrents:
-        status_text = "⏸️ Pausado"
-        toggle_text = "Reanudar"
-    else:
-        status_text = "📥 Descargando"
-        toggle_text = "Pausar"
-
-    filled = int(torrent.progress * total_segments)
-    bar = "🟦" * filled + "⬜" * (total_segments - filled)
-    mensaje_texto = (
-        f"{status_text}: {html.escape(torrent.name)}\n"
-        f"📊 Progreso: {torrent.progress*100:.2f}%\n"
-        f"{bar}\n"
-        f"📦 Tamaño: {formato_tamano(torrent.size)}\n"
-        f"🚀 Velocidad: <b>{torrent.dlspeed / 1e6:.2f} MB/s</b>\n"
-        f"🌱 Semillas: <b>{torrent.num_seeds}</b> | 🤝 Pares: <b>{torrent.num_leechs}</b>\n"
-        f"📂 Guardado en: <code>{html.escape(torrent.save_path)}</code>\n"
-    )
-
-    buttons = [[
-         Button.inline(toggle_text, b"toggle:" + torrent_hash.encode()),
-         Button.inline("Eliminar", b"delete:" + torrent_hash.encode())
-    ]]
-    mensaje = await bot.send_message(CHAT_ID, mensaje_texto, parse_mode="html", buttons=buttons)
-    active_messages[torrent_hash] = mensaje
-
-    ultimo_progreso = torrent.progress
+    mensaje = None # Inicializamos mensaje a None
 
     try:
+        # Obtener la información inicial del torrent
+        while True:
+            try:
+                lista = qb.torrents_info(torrent_hashes=torrent_hash)
+                if lista:
+                    torrent = lista[0]
+                    break
+                else:
+                    active_messages.pop(torrent_hash, None)
+                    active_tasks.pop(torrent_hash, None)
+                    guardar_estado()
+                    return
+            except qbittorrentapi.APIConnectionError as e:
+                print(f"⚠️ qBittorrent no accesible al obtener info del torrent {torrent_hash}: {e}. Reintentando...")
+                qb = await conectar_qbittorrent()
+                await asyncio.sleep(5)
+        
+        if existing_message:
+            mensaje = existing_message
+            print(f"✅ Usando mensaje existente {mensaje.id} para el torrent {torrent.name[:30]}...")
+        else:
+            if torrent_hash in paused_torrents or torrent.state in ['pausedDL', 'stoppedDL']:
+                status_text, toggle_text = "⏸️ Pausado", "Reanudar"
+            else:
+                status_text, toggle_text = "📥 Descargando", "Pausar"
+            
+            filled = int(torrent.progress * total_segments)
+            bar = "🟦" * filled + "⬜" * (total_segments - filled)
+            mensaje_texto = (
+                f"{status_text}: {html.escape(torrent.name)}\n"
+                f"📊 Progreso: {torrent.progress*100:.2f}%\n{bar}\n"
+                f"📦 Tamaño: {formato_tamano(torrent.size)}\n"
+                f"🚀 Velocidad: <b>{formato_velocidad(torrent.dlspeed)}</b>\n"
+                f"🌱 Semillas: <b>{torrent.num_seeds}</b> | 🤝 Pares: <b>{torrent.num_leechs}</b>\n"
+                f"📂 Guardado en: <code>{html.escape(torrent.save_path)}</code>\n"
+            )
+            buttons = [[Button.inline(toggle_text, b"toggle:" + torrent_hash.encode()), Button.inline("Eliminar", b"delete:" + torrent_hash.encode())]]
+            mensaje = await bot.send_message(CHAT_ID, mensaje_texto, parse_mode="html", buttons=buttons)
+            active_messages[torrent_hash] = mensaje
+            guardar_estado()
+
+        ultimo_progreso = torrent.progress
+
         while True:
             num_descargas = len(active_tasks)
             intervalo = 3 if num_descargas == 1 else 6
-
             await asyncio.sleep(intervalo)
 
             while True:
@@ -144,53 +171,20 @@ async def notificar_descarga(torrent_hash):
                     print(f"⚠️ qBittorrent desconectado al actualizar torrent {torrent_hash}: {e}. Esperando reconexión...")
                     qb = await conectar_qbittorrent()
                     await asyncio.sleep(5)
+            
             if not lista:
-                try:
-                    await mensaje.delete()
-                except Exception as e:
-                    print(f"Error al borrar mensaje: {e}")
+                if mensaje: await mensaje.delete()
                 active_messages.pop(torrent_hash, None)
+                guardar_estado()
                 break
             torrent = lista[0]
 
-            if torrent_hash in paused_torrents:
-                status_text = "⏸️ Pausado"
-                toggle_text = "Reanudar"
-            else:
-                status_text = "📥 Descargando"
-                toggle_text = "Pausar"
-
-            if torrent.progress < 0.99 and abs(torrent.progress - ultimo_progreso) < 0.01:
-                continue
-            ultimo_progreso = torrent.progress
-
-            filled = int(torrent.progress * total_segments)
-            bar = "🟦" * filled + "⬜" * (total_segments - filled)
-            mensaje_texto = (
-                f"{status_text}: {html.escape(torrent.name)}\n"
-                f"📊 Progreso: {torrent.progress*100:.2f}%\n"
-                f"{bar}\n"
-                f"📦 Tamaño: {formato_tamano(torrent.size)}\n"
-                f"🚀 Velocidad: <b>{torrent.dlspeed / 1e6:.2f} MB/s</b>\n"
-                f"🌱 Semillas: <b>{torrent.num_seeds}</b> | 🤝 Pares: <b>{torrent.num_leechs}</b>\n"
-                f"📂 Guardado en: <code>{html.escape(torrent.save_path)}</code>\n"
-            )
-
-            buttons = [[
-                 Button.inline(toggle_text, b"toggle:" + torrent_hash.encode()),
-                 Button.inline("Eliminar", b"delete:" + torrent_hash.encode())
-            ]]
-            try:
-                await mensaje.edit(mensaje_texto, parse_mode="html", buttons=buttons)
-            except Exception as e:
-                print(f"Error al editar mensaje para torrent {torrent_hash}: {e}")
-                break
-
-            if (torrent.progress >= 1.0 or torrent.progress >= 0.99) and torrent_hash not in paused_torrents:
-                try:
-                    await mensaje.delete()
-                except Exception as e:
-                    print(f"Error al borrar mensaje: {e}")
+            # --- LÓGICA DE COMPLETADO ---
+            # Comprobamos si el torrent ha terminado.
+            if torrent.progress >= 1.0 and torrent.state not in ['pausedDL', 'checkingUP', 'checkingDL']:
+                await asyncio.sleep(2)
+                if mensaje: await mensaje.delete()
+                
                 active_messages.pop(torrent_hash, None)
                 mensaje_final_texto = (
                     f"✅ <b>Descarga completada:</b>\n\n"
@@ -198,16 +192,68 @@ async def notificar_descarga(torrent_hash):
                     f"📏 <b>{formato_tamano(torrent.size)}</b>\n"
                     f"📂 <b>Guardado en:</b> <code>{html.escape(torrent.save_path)}</code>\n"
                 )
-                buttons_final = [[ Button.inline("Eliminar", b"delete:" + torrent_hash.encode()) ]]
+                buttons_final = [[ Button.inline("Eliminar de qBit (+Archivos)", b"delete:" + torrent_hash.encode()) ]]
                 mensaje_final = await bot.send_message(CHAT_ID, mensaje_final_texto, parse_mode="html", buttons=buttons_final)
                 active_messages[torrent_hash] = mensaje_final
+                guardar_estado()
+                break # Salimos del bucle, la tarea ha terminado.
+            
+            if torrent_hash in paused_torrents or torrent.state in ['pausedDL', 'stoppedDL']:
+                status_text, toggle_text = "⏸️ Pausado", "Reanudar"
+            else:
+                status_text, toggle_text = "📥 Descargando", "Pausar"
+            
+            if abs(torrent.progress - ultimo_progreso) < 0.01 and torrent.state in ['downloading', 'forceDL']:
+                 continue
+            
+            ultimo_progreso = torrent.progress
+            filled = int(torrent.progress * total_segments)
+            bar = "🟦" * filled + "⬜" * (total_segments - filled)
+            mensaje_texto = (
+                f"{status_text}: {html.escape(torrent.name)}\n"
+                f"📊 Progreso: {torrent.progress*100:.2f}%\n{bar}\n"
+                f"📦 Tamaño: {formato_tamano(torrent.size)}\n"
+                f"🚀 Velocidad: <b>{formato_velocidad(torrent.dlspeed)}</b>\n"
+                f"🌱 Semillas: <b>{torrent.num_seeds}</b> | 🤝 Pares: <b>{torrent.num_leechs}</b>\n"
+                f"📂 Guardado en: <code>{html.escape(torrent.save_path)}</code>\n"
+            )
+            buttons = [[Button.inline(toggle_text, b"toggle:" + torrent_hash.encode()), Button.inline("Eliminar", b"delete:" + torrent_hash.encode())]]
+            
+            try:
+                if mensaje: await mensaje.edit(mensaje_texto, parse_mode="html", buttons=buttons)
+            except MessageNotModifiedError: pass
+            except Exception as e:
+                print(f"Error al editar mensaje para torrent {torrent_hash}: {e}")
                 break
+
     except asyncio.CancelledError:
+        # --- NUEVA LÓGICA PARA MANEJAR LA CANCELACIÓN ---
+        # El bucle principal nos canceló. Hacemos una última comprobación para ver si fue por descarga completada.
         try:
-            await mensaje.delete()
+            lista = qb.torrents_info(torrent_hashes=torrent_hash)
+            if lista and lista[0].progress >= 1.0:
+                torrent = lista[0]
+                if mensaje: await mensaje.delete()
+                active_messages.pop(torrent_hash, None)
+                mensaje_final_texto = (
+                    f"✅ <b>Descarga completada:</b>\n\n"
+                    f"🎬 <b>{html.escape(torrent.name)}</b>\n"
+                    f"📏 <b>{formato_tamano(torrent.size)}</b>\n"
+                    f"📂 <b>Guardado en:</b> <code>{html.escape(torrent.save_path)}</code>\n"
+                )
+                buttons_final = [[ Button.inline("Eliminar de qBit (+Archivos)", b"delete:" + torrent_hash.encode()) ]]
+                mensaje_final = await bot.send_message(CHAT_ID, mensaje_final_texto, parse_mode="html", buttons=buttons_final)
+                active_messages[torrent_hash] = mensaje_final
+                guardar_estado()
+            else:
+                # Si no, fue una cancelación normal. Solo limpiamos.
+                if mensaje: await mensaje.delete()
+                active_messages.pop(torrent_hash, None)
+                guardar_estado()
         except Exception as e:
-            print(f"Error al borrar mensaje tras cancelación: {e}")
-        active_messages.pop(torrent_hash, None)
+            print(f"Error en la lógica de cancelación para {torrent_hash}: {e}")
+            active_messages.pop(torrent_hash, None)
+            guardar_estado()
         raise
 
 # --- Manejo de archivos torrent enviados ---
@@ -349,16 +395,30 @@ async def callback_handler(event):
     elif data.startswith(b"toggle:"):
         torrent_hash = data.split(b":", 1)[1].decode()
         try:
-            if torrent_hash in paused_torrents:
+            # 1. Obtener el estado REAL del torrent desde qBittorrent
+            torrent_info = qb.torrents_info(torrent_hashes=torrent_hash)
+            if not torrent_info:
+                await event.answer("❌ Error: El torrent ya no existe.", alert=True)
+                return
+
+            current_state = torrent_info[0].state
+
+            # 2. Decidir si pausar o reanudar basándose en el estado real
+            if current_state in ['pausedDL', 'stoppedDL']:
+                # Si está pausado o detenido, lo reanudamos
                 qb.torrents_resume(torrent_hashes=[torrent_hash])
-                paused_torrents.remove(torrent_hash)
-                await event.answer("Torrent reanudado")
+                paused_torrents.discard(torrent_hash) # Usamos discard para no tener errores
+                await event.answer("▶️ Torrent reanudado")
             else:
+                # Si está en cualquier otro estado (descargando, etc.), lo pausamos
                 qb.torrents_pause(torrent_hashes=[torrent_hash])
                 paused_torrents.add(torrent_hash)
-                await event.answer("Torrent pausado")
+                await event.answer("⏸️ Torrent pausado")
+
         except qbittorrentapi.APIConnectionError:
-            await event.answer("qBittorrent no está accesible.", alert=True)
+            await event.answer("⚠️ qBittorrent no está accesible.", alert=True)
+        except Exception as e:
+            await event.answer(f"❌ Error inesperado: {e}", alert=True)
         return
 
     elif data.startswith(b"delete:"):
@@ -380,6 +440,7 @@ async def callback_handler(event):
             paused_torrents.discard(torrent_hash)
             active_tasks.pop(torrent_hash, None)
             active_messages.pop(torrent_hash, None)
+            guardar_estado()
             
             # Respondemos al usuario y borramos el mensaje (siempre)
             await event.answer("Acción completada. Mensaje eliminado.", alert=True)
@@ -722,30 +783,84 @@ async def show_status(event):
     # Lanza la tarea que se encargará de actualizar el panel de estado
     status_panel_task = asyncio.create_task(update_status_panel(event))
 
-# --- Monitorización de qBittorrent: lanza tareas para torrents nuevos ---
 async def monitorear_qbittorrent():
-    global qb, active_tasks
-    torrents_iniciales = {t.hash: t for t in qb.torrents_info(filter="downloading")}
-    for t_hash in torrents_iniciales:
-        active_tasks[t_hash] = asyncio.create_task(notificar_descarga(t_hash))
-    print(f"🔄 {len(torrents_iniciales)} torrents ya estaban descargando al iniciar. Se notificarán dinámicamente.")
-    descargas_previas = set(torrents_iniciales.keys())
+    global qb, active_tasks, active_messages
+
+    print("🔄 Iniciando el motor de monitoreo de qBittorrent...")
+
+    # --- LÓGICA DE ARRANQUE REFACTORIZADA ---
+    try:
+        # 1. Cargar estado guardado y obtener torrents activos
+        mensajes_guardados = cargar_estado()
+        torrents_actuales = qb.torrents_info()
+        print(f"📄 Se encontraron {len(mensajes_guardados)} mensajes en el estado y {len(torrents_actuales)} torrents en qBit.")
+
+        # 2. Intentar revincular mensajes existentes del estado anterior
+        for torrent in torrents_actuales:
+            t_hash = torrent.hash
+            if t_hash in mensajes_guardados:
+                message_id = mensajes_guardados[t_hash]
+                try:
+                    # Intentamos obtener el objeto del mensaje desde Telegram
+                    existing_message_obj = await bot.get_messages(CHAT_ID, ids=message_id)
+                    if existing_message_obj:
+                        print(f"🔗 Revinculando con mensaje {message_id} para torrent '{torrent.name[:25]}...'")
+                        active_messages[t_hash] = existing_message_obj
+                    else:
+                        print(f"⚠️ El mensaje {message_id} para el torrent {t_hash} no se encontró en Telegram. Se creará uno nuevo.")
+                except Exception as e:
+                    print(f"❌ Error recuperando mensaje {message_id}: {e}. Se creará uno nuevo.")
+
+        # 3. Lanzar tareas de monitoreo para TODOS los torrents que lo necesiten
+        estados_a_monitorizar = ['downloading', 'metaDL', 'stalledDL', 'forceDL', 'pausedDL', 'stoppedDL']
+        for torrent in torrents_actuales:
+            if torrent.state in estados_a_monitorizar:
+                t_hash = torrent.hash
+                # La tarea decidirá si edita un mensaje (si lo encontramos) o crea uno nuevo
+                existing_message = active_messages.get(t_hash)
+                if t_hash not in active_tasks:
+                     active_tasks[t_hash] = asyncio.create_task(notificar_descarga(t_hash, existing_message=existing_message))
+
+        # 4. Guardar el estado actual y limpio.
+        # Esto asegura que los mensajes que no se encontraron se eliminen del archivo de estado.
+        guardar_estado()
+        print(f"✅ Monitoreo inicial completado. {len(active_messages)} mensajes activos. {len(active_tasks)} tareas en total.")
+
+    except Exception as e:
+        print(f"❌ Error crítico durante el arranque del monitoreo: {e}")
+
+    # --- BUCLE DE MONIToreo PRINCIPAL (se ejecuta continuamente) ---
     while True:
         try:
-            torrents_actuales = {t.hash: t for t in qb.torrents_info(filter="downloading")}
-            descargas_previas = {h for h in descargas_previas if h in torrents_actuales}
-            torrents_nuevos = set(torrents_actuales.keys()) - descargas_previas
-            for t_hash in torrents_nuevos:
+            # 1. Obtener la lista COMPLETA de torrents (sin filtro)
+            info_completa = qb.torrents_info()
+            
+            # 2. Filtrar en Python para obtener los hashes que nos interesan
+            hashes_actuales_en_descarga = {t.hash for t in info_completa if t.state in estados_a_monitorizar}
+
+            # 3. Detectar torrents NUEVOS y crearles una tarea
+            hashes_ya_monitorizados = set(active_tasks.keys())
+            nuevos_hashes = hashes_actuales_en_descarga - hashes_ya_monitorizados
+            
+            for t_hash in nuevos_hashes:
+                print(f"➕ Detectado nuevo torrent para monitorizar.")
                 active_tasks[t_hash] = asyncio.create_task(notificar_descarga(t_hash))
-                descargas_previas.add(t_hash)
-            for t_hash, task in list(active_tasks.items()):
-                if task.done():
-                    active_tasks.pop(t_hash, None)
+
+            # 4. Limpiar tareas de torrents que ya NO están en descarga (completados, borrados, etc.)
+            hashes_a_eliminar = hashes_ya_monitorizados - hashes_actuales_en_descarga
+            for t_hash in hashes_a_eliminar:
+                task = active_tasks.pop(t_hash, None)
+                if task and not task.done():
+                    task.cancel() # La tarea se encargará de borrar su mensaje
+                    print(f"➖ Dejando de monitorizar torrent {t_hash} (completado o eliminado).")
+
         except qbittorrentapi.APIConnectionError:
             print("⚠️ Perdida la conexión con qBittorrent. Intentando reconectar...")
             qb = await conectar_qbittorrent()
-        await asyncio.sleep(5)
-
+        except Exception as e:
+            print(f"❌ Error inesperado en el bucle de monitoreo principal: {e}")
+        
+        await asyncio.sleep(5) # Pausa entre cada ciclo de comprobación
 # --- Función principal ---
 async def main():
     global qb
@@ -756,6 +871,8 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
+
+
 
 
 
